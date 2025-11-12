@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/wait.h>
-#include <signal.h>      
+#include <signal.h>
 #include <sys/types.h>
 #include <dirent.h>
 #include <ctype.h>
@@ -31,17 +31,45 @@ void handle_killterm() {
 }
 
 // 2. Kill all terminals
+int killed = 0;
 void handle_killallterms() {
-    printf("Terminating all f25shell...\n");
-    pid_t pgid = getpgrp();
-    // Terminate this process via SIGKILL to pgid
-    int kill_status = kill(-pgid, SIGKILL);
 
-    // Print based on kill return value
-    if (kill_status == -1) {
-        printf("Failed to terminate all f25shell instances\n");
-    } else {
-        printf("All f25shell instances killed\n");
+    // first get all processes
+    collect_processes();
+    pid_t shell_id = getpid();
+
+    for (int i = 0; i < process_count; ++i) {
+        pid_t pid = session_processes[i];
+
+        // process list has ourselves also so skip it
+        if (pid == shell_id)    continue;
+
+        // read the executable name
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+
+        char name[32] = {0};
+        if (fgets(name, sizeof(name), fp)) {
+            // strip trailing newline
+            name[strcspn(name, "\n")] = '\0';
+
+            //comparing the process name with f25shell
+            if (strcmp(name, "f25shell") == 0) {
+                if (kill(pid, SIGTERM) == 0) {
+                    printf("Killed f25shell PID %d\n", pid);
+                    killed = killed + 1;
+                } else {
+                    printf("Failed to kill f25shell PID %d\n", pid);
+                }
+            }
+        }
+        fclose(fp);
+    } 
+    if (killed == 0) {
+        printf("No other f25shell instances found.\n");
     }
 }
 
@@ -52,6 +80,19 @@ int child_count = 0;
 #define MAX_PROCESSES 1024
 int process_count;
 pid_t session_processes[MAX_PROCESSES];
+
+#define MAX_BG_JOBS 256
+pid_t bg_jobs[MAX_BG_JOBS];
+int bg_job_count = 0;
+
+// helper to add background job
+static void add_background_job(pid_t pid) {
+    if (bg_job_count < MAX_BG_JOBS) {
+        bg_jobs[bg_job_count++] = pid;
+    } else {
+        printf("Too many background jobs\n");
+    }
+}
 
 // helper to get all processes and its count
 void collect_processes(void) {
@@ -90,17 +131,21 @@ void collect_processes(void) {
     } 
     closedir(proc_dir);
 }
-
-
 // 3. Count bg processes
-void count_bg_processes() {
-    collect_processes();
-    process_count =  process_count - 2; // Exclude bash and current shell
-    printf("Number of background processes in current session: %d\n", process_count);
+void count_bg_processes(void) {
+    int alive = 0;  
+    // Iterate through stored background PIDs
+    for (int i = 0; i < bg_job_count; i++) {
+        // Check if process is still alive
+        if (kill(bg_jobs[i], 0) == 0) {
+            alive = alive + 1;
+        }
+    }
+    printf("Number of background processes in current session: %d\n", alive);
 }
 
 // 4. Kill all processes other than current and bash
-void kill_all_bg_processes() {
+void kill_all_processes() {
     collect_processes();
     int processes_killed = 0;
     pid_t bash_id = getppid();
@@ -131,15 +176,33 @@ void print_tokens(char *tokens[], int num_args) {
     }
 }
 
+/* helpers */
+void shell_err(const char *fmt, ...);
+int redirect_input(const char *file);
+int redirect_output(const char *file, int append);
+void add_bg(pid_t pid);
+void count_bg(void);
+void kill_bg(void);
+
+/* file ops */
+int  count_words(const char *file);
+int  append_files(const char *f1, const char *f2);
+int  concat_files(int n, const char **files, const char *out);
+
+/* chaining & piping */
+void exec_chain(const char *input);
+void exec_pipe(char **cmds, int n, int reverse);
+
 /* ======Main Function====== */
 int main(int num_args, char *arguments[]) {
 
-    // Argument validation (1 <= num_args <= 5)
+    // Argument validation
     if (num_args != 1) {
         printf("No Arguments needed\n");
         return 1;
     }
 
+    // token size and array for tokens
     char input[MAX_INPUT];
     char *tokens[MAX_ARGS];
 
@@ -168,7 +231,7 @@ int main(int num_args, char *arguments[]) {
         /* execvp needs NULL termination */
         tokens[num_tokens] = NULL;
 
-        if (num_tokens == 0) continue; // empty input: prompt again
+        if (num_tokens == 0) continue; // empty input: prompt again checking again
 
         int command_matched = 0;
         // Array of valid commands
@@ -209,11 +272,9 @@ int main(int num_args, char *arguments[]) {
                         printf("Few/many arguments received\n");
                         break;
                     }
-                    kill_all_bg_processes();
+                    kill_all_processes();
                     break;
 
-                default:
-                    printf("Invalid command\n");
                 }
                 break;
             }
@@ -240,9 +301,10 @@ int main(int num_args, char *arguments[]) {
                 if (is_background) {
                     // Don't wait for background processes
                     printf("Background process started with PID: %d\n", pid);
+                    add_background_job(pid);
                 } else {
                     // wait for foreground process to finish
-                    wait(NULL);
+                    wait(pid, NULL, 0);
                 }
             } else {
                 printf("Fork failed\n");
