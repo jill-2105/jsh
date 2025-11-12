@@ -157,6 +157,19 @@ int main(int num_args, char *arguments[]) {
             input[length - 1] = '\0';
         }
 
+        // Tokenize input first
+        int num_tokens = 0;
+        char *token = strtok(input, " ");
+        while (token != NULL && num_tokens < MAX_ARGS - 1) {
+            tokens[num_tokens++] = token;
+            token = strtok(NULL, " ");
+        }
+
+        /* execvp needs NULL termination */
+        tokens[num_tokens] = NULL;
+
+        if (num_tokens == 0) continue; // empty input: prompt again
+
         int command_matched = 0;
         // Array of valid commands
         const char *commands[] = {
@@ -164,38 +177,37 @@ int main(int num_args, char *arguments[]) {
         };
 
         for (int i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
-
             if (strcmp(tokens[0], commands[i]) == 0) {
                 command_matched = 1;
                 switch (i + 1) {
                 case 1: // 1. Kill current terminal - killterm
-                    if (num_args != 1) {
+                    if (num_tokens != 1) {
                         printf("Few/many arguments received\n");
-                        return 1;
+                        break;
                     }
                     handle_killterm();
                     break;
 
                 case 2: // 2. Kill all terminals - killallterms
-                    if (num_args != 1) {
+                    if (num_tokens != 1) {
                         printf("Few/many arguments received\n");
-                        return 1;
+                        break;
                     }
                     handle_killallterms();
                     break;
 
                 case 3: // 3. Count bg processes - numbg
-                    if (num_args != 4) {
+                    if (num_tokens != 1) {
                         printf("Few/many arguments received\n");
-                        return 1;
+                        break;
                     }
                     count_bg_processes();
                     break;
 
                 case 4: // 4. kill all process other than current and bash - killbp
-                    if (num_args != 1) {
+                    if (num_tokens != 1) {
                         printf("Few/many arguments received\n");
-                        return 1;
+                        break;
                     }
                     kill_all_bg_processes();
                     break;
@@ -208,53 +220,33 @@ int main(int num_args, char *arguments[]) {
         }
 
         if (!command_matched) {
-            // Tokenize input
-            int num_args = 0;
-            char *token = strtok(input, " ");
-            while (token != NULL && num_args < MAX_ARGS - 1) {
-                tokens[num_args++] = token;
-                token = strtok(NULL, " ");
+            // Check if it's a background process (ends with "&")
+            int is_background = 0;
+            if (num_tokens > 0 && strcmp(tokens[num_tokens - 1], "&") == 0) {
+                tokens[num_tokens - 1] = NULL;  // Remove "&" from args
+                num_tokens--;  // Adjust count
+                is_background = 1;
             }
-
-            /* execvp needs NULL termination */
-            tokens[num_args] = NULL;
             
-            if (num_args > 0 && strcmp(tokens[num_args - 1], "&") == 0) {
-                tokens[num_args - 1] = NULL;  // Remove "&" from args
-                
-                int pid = fork();
-                if (pid == 0) {
-                    print_tokens(tokens, num_args);
-                    execvp(tokens[0] & , tokens);
-
-                    // if this line executes means execvp failed
-                    printf("Exec failed for %s\n", tokens[0]);
-                    exit(1);
-                } else if (pid > 0) {
-                    // wait for execvp to finish
-                    wait(NULL);
-                } else {
-                printf("Fork failed\n");
-                }
-            }
-
-            if (num_args == 0) continue; // empty input: prompt again
-
             int pid = fork();
             if (pid == 0) {
-                print_tokens(tokens, num_args);
+                print_tokens(tokens, num_tokens);
                 execvp(tokens[0], tokens);
 
                 // if this line executes means execvp failed
                 printf("Exec failed for %s\n", tokens[0]);
                 exit(1);
             } else if (pid > 0) {
-                // wait for execvp to finish
-                wait(NULL);
+                if (is_background) {
+                    // Don't wait for background processes
+                    printf("Background process started with PID: %d\n", pid);
+                } else {
+                    // wait for foreground process to finish
+                    wait(NULL);
+                }
             } else {
-            printf("Fork failed\n");
+                printf("Fork failed\n");
             }
         }
     }
-    break;
 }
