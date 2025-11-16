@@ -375,6 +375,250 @@ void check_file_ops(char *tokens[], int num_tokens) {
 }
 
 
+// 9. Input redirection
+void redir_in(char *tokens[], int num_tokens) {
+    int redir_pos = -1;
+    
+    // Find position of < operator
+    int i;
+    for(i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], "<") == 0) {
+            redir_pos = i;
+            break;
+        }
+    }
+    
+    // Validate redirection syntax
+    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
+        printf("Invalid input redirection syntax\n");
+        return;
+    }
+    
+    // Validate argc for command part
+    if(redir_pos < 1 || redir_pos > 5) {
+        printf("Command argc must be between 1 and 5\n");
+        return;
+    }
+    
+    // Build command array
+    char *cmd[MAX_ARGS];
+    for(i=0; i<redir_pos; i++) {
+        cmd[i] = tokens[i];
+    }
+    cmd[redir_pos] = NULL;
+    
+    char *filename = tokens[redir_pos + 1];
+    
+    int fork_res = fork();
+    if(fork_res == 0) {
+        // Child process - setup input redirection
+        int fd = open(filename, O_RDONLY);
+        if(fd < 0) {
+            printf("Failed to open file %s\n", filename);
+            exit(1);
+        }
+        
+        // Redirect stdin to file
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+        
+        execvp(cmd[0], cmd);
+        printf("Exec failed for %s\n", cmd[0]);
+        exit(1);
+    } else if(fork_res > 0) {
+        wait(NULL);
+    } else {
+        printf("Fork failed\n");
+    }
+}
+
+
+// 10. Output redirection
+void redir_out(char *tokens[], int num_tokens) {
+    int redir_pos = -1;
+    
+    // Find position of > operator
+    int i;
+    for(i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], ">") == 0) {
+            redir_pos = i;
+            break;
+        }
+    }
+    
+    // Validate redirection syntax
+    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
+        printf("Invalid output redirection syntax\n");
+        return;
+    }
+    
+    // Validate argc for command part
+    if(redir_pos < 1 || redir_pos > 5) {
+        printf("Command argc must be between 1 and 5\n");
+        return;
+    }
+    
+    // Build command array
+    char *cmd[MAX_ARGS];
+    for(i=0; i<redir_pos; i++) {
+        cmd[i] = tokens[i];
+    }
+    cmd[redir_pos] = NULL;
+    
+    char *filename = tokens[redir_pos + 1];
+    
+    int fork_res = fork();
+    if(fork_res == 0) {
+        // Child process - setup output redirection
+        int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if(fd < 0) {
+            printf("Failed to open file %s\n", filename);
+            exit(1);
+        }
+        
+        // Redirect stdout to file
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        
+        execvp(cmd[0], cmd);
+        printf("Exec failed for %s\n", cmd[0]);
+        exit(1);
+    } else if(fork_res > 0) {
+        wait(NULL);
+    } else {
+        printf("Fork failed\n");
+    }
+}
+
+
+// 11. Append output redirection
+void redir_append(char *tokens[], int num_tokens) {
+    int redir_pos = -1;
+    
+    // Find position of >> operator
+    int i;
+    for(i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], ">>") == 0) {
+            redir_pos = i;
+            break;
+        }
+    }
+    
+    // Validate redirection syntax
+    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
+        printf("Invalid append redirection syntax\n");
+        return;
+    }
+    
+    // Validate argc for command part
+    if(redir_pos < 1 || redir_pos > 5) {
+        printf("Command argc must be between 1 and 5\n");
+        return;
+    }
+    
+    // Build command array
+    char *cmd[MAX_ARGS];
+    for(i=0; i<redir_pos; i++) {
+        cmd[i] = tokens[i];
+    }
+    cmd[redir_pos] = NULL;
+    
+    char *filename = tokens[redir_pos + 1];
+    
+    int fork_res = fork();
+    if(fork_res == 0) {
+        // Child process - setup append redirection
+        int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if(fd < 0) {
+            printf("Failed to open file %s\n", filename);
+            exit(1);
+        }
+        
+        // Redirect stdout to file
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+        
+        execvp(cmd[0], cmd);
+        printf("Exec failed for %s\n", cmd[0]);
+        exit(1);
+    } else if(fork_res > 0) {
+        wait(NULL);
+    } else {
+        printf("Fork failed\n");
+    }
+}
+
+
+// 12. Sequential execution
+void seqexec(char *tokens[], int num_tokens) {
+    // Count number of semicolons
+    int semi_count = 0;
+    int i;
+    for(i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], ";") == 0) {
+            semi_count = semi_count + 1;
+        }
+    }
+    
+    // Validate max commands
+    if(semi_count > 3) {
+        printf("Maximum 4 sequential commands allowed\n");
+        return;
+    }
+    
+    // Execute commands sequentially
+    int start = 0;
+    for(i=0; i<=num_tokens; i++) {
+        if(i == num_tokens || strcmp(tokens[i], ";") == 0) {
+            int cmd_len = i - start;
+            
+            // Check if command segment is empty
+            if(cmd_len == 0) {
+                printf("Empty command in sequential execution\n");
+                return;
+            }
+            
+            // Validate argc for this segment
+            if(cmd_len < 1 || cmd_len > 5) {
+                printf("Each command argc must be between 1 and 5\n");
+                return;
+            }
+            
+            // Build command array for this segment
+            char *cmd[MAX_ARGS];
+            int j;
+            for(j=0; j<cmd_len; j++) {
+                cmd[j] = tokens[start + j];
+            }
+            cmd[cmd_len] = NULL;
+            
+            // Execute this command
+            int fork_res = fork();
+            if(fork_res == 0) {
+                execvp(cmd[0], cmd);
+                // If exec fails, child exits with error
+                exit(1);
+            } else if(fork_res > 0) {
+                int status;
+                waitpid(fork_res, &status, 0);
+                
+                // Check if child process failed to exec
+                if(WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                    // Command not found or exec failed - stop execution
+                    printf("Command execution failed, stopping sequential execution\n");
+                    return;
+                }
+            } else {
+                printf("Fork failed\n");
+                return;
+            }
+            
+            start = i + 1;
+        }
+    }
+}
+
+
 /* ======Main Function====== */
 int main(int num_args, char *arguments[]) {
 
@@ -491,6 +735,50 @@ int main(int num_args, char *arguments[]) {
             }
             
             if(has_file_op) continue;
+            
+            // Check for redirection operators
+            int has_redir = 0;
+            
+            // Check for >> first (before >)
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], ">>") == 0) {
+                    has_redir = 1;
+                    redir_append(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_redir) continue;
+            
+            // Check for > operator
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], ">") == 0) {
+                    has_redir = 1;
+                    redir_out(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_redir) continue;
+            
+            // Check for < operator
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], "<") == 0) {
+                    has_redir = 1;
+                    redir_in(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_redir) continue;
+            
+            // Check for sequential execution
+            int has_semi = 0;
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], ";") == 0) {
+                    has_semi = 1;
+                    seqexec(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_semi) continue;
             
             // Check if it's a background process (ends with "&")
             int is_background = 0;
