@@ -10,14 +10,17 @@
 #include <errno.h>
 #include <fcntl.h>
 
-
 #define MAX_ARGS 64
 #define MAX_INPUT_SIZE 1024
 #define MAX_COMMANDS 25
-
 #define MAX_PROCESSES 1024
-int process_count;
+#define MAX_BG_JOBS 256
+
 pid_t session_processes[MAX_PROCESSES];
+int process_count;
+
+pid_t bg_jobs[MAX_BG_JOBS];
+int bg_job_count = 0;
 
 /* ======Functions====== */
 
@@ -29,9 +32,10 @@ void collect_processes(void) {
     
     process_count = 0;  // Reset count
     
+    // Reading /proc to get the process list
     DIR *proc_dir = opendir("/proc");
     if (!proc_dir) {
-        perror("opendir /proc");
+        printf("Error opening /proc");
         return;
     }
     
@@ -61,7 +65,6 @@ void collect_processes(void) {
 
 // 1. Kill current terminal
 void handle_killterm() {
-    printf("Terminating current f25shell...\n");
     pid_t pid = getpid();
     // Terminate this process via SIGKILL to pid
     int kill_status = kill(pid, SIGKILL);
@@ -88,7 +91,7 @@ void handle_killallterms() {
         // process list has ourselves also so skip it
         if (pid == shell_id)    continue;
 
-        // read the executable name
+        // read the executable name skip if not f25shell
         char path[64];
         snprintf(path, sizeof(path), "/proc/%d/comm", pid);
 
@@ -109,21 +112,11 @@ void handle_killallterms() {
                     printf("Failed to kill f25shell PID %d\n", pid);
                 }
             }
-        }
-        fclose(fp);
+        } fclose(fp);
     } 
-    if (killed == 0) {
+    if (killed == 0)
         printf("No other f25shell instances found.\n");
-    }
 }
-
-#define MAX_CHILDREN 256
-pid_t children[MAX_CHILDREN];
-int child_count = 0;
-
-#define MAX_BG_JOBS 256
-pid_t bg_jobs[MAX_BG_JOBS];
-int bg_job_count = 0;
 
 // helper to add background job
 static void add_background_job(pid_t pid) {
@@ -164,7 +157,7 @@ void kill_all_processes() {
                 processes_killed = processes_killed + 1;
             } else if (errno == ESRCH) {
                 // Process already dead - not an error
-                processes_killed++;  // Count as success
+                processes_killed = processes_killed + 1;  // Count as success
             } else {
                 printf("Failed to kill process %d\n", pid);
             }
@@ -175,38 +168,29 @@ void kill_all_processes() {
 // 6. Word count for text file
 void file_wordcount(char *tokens[], int num_tokens) {
     // Validate arguments
-    if(num_tokens != 2) {
-        printf("Few/many arguments received\n");
-        return;
-    }
-
-    // Validate argc rule
-    if(num_tokens < 1 || num_tokens > 5) {
+    if(num_tokens != 2 || num_tokens < 1 || num_tokens > 5) {
         printf("Command argc must be between 1 and 5\n");
         return;
     }
 
+    // opening the file - argc 1
     char *filename = tokens[1];
-    
-    // Open file with low-level call
     int fd = open(filename, O_RDONLY);
     if(fd < 0) {
         printf("Failed to open file %s\n", filename);
         return;
     }
 
-    // Read file content into buffer
+    // Reading the file content
     char buffer[4096];
     int bytes_read;
     int word_count = 0;
     int in_word = 0;
 
     while((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
-        // Manual word counting
         int i;
         for(i=0; i<bytes_read; i++) {
             char ch = buffer[i];
-            
             // Check if character is whitespace
             if(ch==' ' || ch=='\n' || ch=='\t' || ch=='\r') {
                 if(in_word) {
@@ -218,41 +202,39 @@ void file_wordcount(char *tokens[], int num_tokens) {
             }
         }
     }
-
     // Count last word if file doesn't end with whitespace
     if(in_word) {
         word_count = word_count + 1;
     }
-
     close(fd);
-    printf("%d\n", word_count);
+    printf("Total word count is: %d\n", word_count);
 }
-
 
 // 7. File concatenation
 void file_concat(char *tokens[], int num_tokens) {
-    // Count number of files (skip + operators)
+    // Count number of files
     int file_count = 0;
     char *files[MAX_COMMANDS];
     
-    int i;
-    for(i=0; i<num_tokens; i++) {
+    for(int i=0; i<num_tokens; i++) {
         if(strcmp(tokens[i], "+") != 0) {
             files[file_count] = tokens[i];
+            // files will be 1 more than the + operators
             file_count = file_count + 1;
         }
     }
 
+    int plus_count = num_tokens - file_count;
+    
     // Validate file count
     if(file_count < 2) {
-        printf("Need at least 2 files for concatenation\n");
+        printf("Need at least 2 files\n");
         return;
     }
 
     // Check max concatenation operations
-    int plus_count = num_tokens - file_count;
     if(plus_count > 4) {
-        printf("Maximum 4 concatenation operations allowed\n");
+        printf("Maximum 4 concatenation only\n");
         return;
     }
 
@@ -268,18 +250,14 @@ void file_concat(char *tokens[], int num_tokens) {
         char buffer[4096];
         int bytes_read;
         while((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
-            // Write to stdout using file descriptor 1
             write(1, buffer, bytes_read);
         }
-
         close(fd);
     }
 }
 
-
 // 8. File append operation
 void file_append(char *tokens[], int num_tokens) {
-    // Validate format: file1.txt ++ file2.txt
     if(num_tokens != 3) {
         printf("Few/many arguments received\n");
         return;
@@ -301,7 +279,7 @@ void file_append(char *tokens[], int num_tokens) {
         return;
     }
 
-    char buffer1[16384];
+    char buffer1[4096];
     int bytes1 = read(fd1, buffer1, sizeof(buffer1));
     if(bytes1 < 0) {
         printf("Failed to read file %s\n", file1);
@@ -317,7 +295,7 @@ void file_append(char *tokens[], int num_tokens) {
         return;
     }
 
-    char buffer2[16384];
+    char buffer2[4096];
     int bytes2 = read(fd2, buffer2, sizeof(buffer2));
     if(bytes2 < 0) {
         printf("Failed to read file %s\n", file2);
@@ -347,8 +325,7 @@ void file_append(char *tokens[], int num_tokens) {
     printf("Files appended successfully\n");
 }
 
-
-// Helper function to check for file operations
+// helper function to check for file operations
 void check_file_ops(char *tokens[], int num_tokens) {
     // Check for word count operator
     if(strcmp(tokens[0], "#") == 0) {
@@ -374,194 +351,94 @@ void check_file_ops(char *tokens[], int num_tokens) {
     }
 }
 
+// helper function for all redirection operations
+void handle_redirection(char *tokens[], int num_tokens, const char *operator, int flags, const char *error_msg) {
+    int redir_pos = -1;
+    
+    // Find position of operator
+    int i;
+    for(i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], operator) == 0) {
+            redir_pos = i;
+            break;
+        }
+    }
+    
+    // Validate redirection syntax
+    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
+        printf("%s\n", error_msg);
+        return;
+    }
+    
+    // Validate argc for command part
+    if(redir_pos < 1 || redir_pos > 5) {
+        printf("Command argc must be between 1 and 5\n");
+        return;
+    }
+    
+    // Build command array
+    char *cmd[MAX_ARGS];
+    for(i=0; i<redir_pos; i++) {
+        cmd[i] = tokens[i];
+    }
+    cmd[redir_pos] = NULL;
+    
+    char *filename = tokens[redir_pos + 1];
+    
+    int fork_res = fork();
+    if(fork_res == 0) {
+        // Child process - setup redirection
+        int fd = open(filename, flags, 0644);
+        if(fd < 0) {
+            printf("Failed to open file %s\n", filename);
+            exit(1);
+        }
+        
+        // Redirect based on flags (input vs output)
+        if(flags == O_RDONLY) {
+            dup2(fd, STDIN_FILENO);
+        } else {
+            dup2(fd, STDOUT_FILENO);
+        }
+        close(fd);
+        
+        execvp(cmd[0], cmd);
+        printf("Exec failed for %s\n", cmd[0]);
+        exit(1);
+    } else if(fork_res > 0) {
+        wait(NULL);
+    } else {
+        printf("Fork failed\n");
+    }
+}
 
 // 9. Input redirection
 void redir_in(char *tokens[], int num_tokens) {
-    int redir_pos = -1;
-    
-    // Find position of < operator
-    int i;
-    for(i=0; i<num_tokens; i++) {
-        if(strcmp(tokens[i], "<") == 0) {
-            redir_pos = i;
-            break;
-        }
-    }
-    
-    // Validate redirection syntax
-    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
-        printf("Invalid input redirection syntax\n");
-        return;
-    }
-    
-    // Validate argc for command part
-    if(redir_pos < 1 || redir_pos > 5) {
-        printf("Command argc must be between 1 and 5\n");
-        return;
-    }
-    
-    // Build command array
-    char *cmd[MAX_ARGS];
-    for(i=0; i<redir_pos; i++) {
-        cmd[i] = tokens[i];
-    }
-    cmd[redir_pos] = NULL;
-    
-    char *filename = tokens[redir_pos + 1];
-    
-    int fork_res = fork();
-    if(fork_res == 0) {
-        // Child process - setup input redirection
-        int fd = open(filename, O_RDONLY);
-        if(fd < 0) {
-            printf("Failed to open file %s\n", filename);
-            exit(1);
-        }
-        
-        // Redirect stdin to file
-        dup2(fd, STDIN_FILENO);
-        close(fd);
-        
-        execvp(cmd[0], cmd);
-        printf("Exec failed for %s\n", cmd[0]);
-        exit(1);
-    } else if(fork_res > 0) {
-        wait(NULL);
-    } else {
-        printf("Fork failed\n");
-    }
+    handle_redirection(tokens, num_tokens, "<", O_RDONLY, "Invalid input redirection syntax");
 }
-
 
 // 10. Output redirection
 void redir_out(char *tokens[], int num_tokens) {
-    int redir_pos = -1;
-    
-    // Find position of > operator
-    int i;
-    for(i=0; i<num_tokens; i++) {
-        if(strcmp(tokens[i], ">") == 0) {
-            redir_pos = i;
-            break;
-        }
-    }
-    
-    // Validate redirection syntax
-    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
-        printf("Invalid output redirection syntax\n");
-        return;
-    }
-    
-    // Validate argc for command part
-    if(redir_pos < 1 || redir_pos > 5) {
-        printf("Command argc must be between 1 and 5\n");
-        return;
-    }
-    
-    // Build command array
-    char *cmd[MAX_ARGS];
-    for(i=0; i<redir_pos; i++) {
-        cmd[i] = tokens[i];
-    }
-    cmd[redir_pos] = NULL;
-    
-    char *filename = tokens[redir_pos + 1];
-    
-    int fork_res = fork();
-    if(fork_res == 0) {
-        // Child process - setup output redirection
-        int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if(fd < 0) {
-            printf("Failed to open file %s\n", filename);
-            exit(1);
-        }
-        
-        // Redirect stdout to file
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-        
-        execvp(cmd[0], cmd);
-        printf("Exec failed for %s\n", cmd[0]);
-        exit(1);
-    } else if(fork_res > 0) {
-        wait(NULL);
-    } else {
-        printf("Fork failed\n");
-    }
+    handle_redirection(tokens, num_tokens, ">", O_WRONLY | O_CREAT | O_TRUNC, "Invalid output redirection syntax");
 }
-
 
 // 11. Append output redirection
 void redir_append(char *tokens[], int num_tokens) {
-    int redir_pos = -1;
-    
-    // Find position of >> operator
-    int i;
-    for(i=0; i<num_tokens; i++) {
-        if(strcmp(tokens[i], ">>") == 0) {
-            redir_pos = i;
-            break;
-        }
-    }
-    
-    // Validate redirection syntax
-    if(redir_pos == -1 || redir_pos + 1 >= num_tokens) {
-        printf("Invalid append redirection syntax\n");
-        return;
-    }
-    
-    // Validate argc for command part
-    if(redir_pos < 1 || redir_pos > 5) {
-        printf("Command argc must be between 1 and 5\n");
-        return;
-    }
-    
-    // Build command array
-    char *cmd[MAX_ARGS];
-    for(i=0; i<redir_pos; i++) {
-        cmd[i] = tokens[i];
-    }
-    cmd[redir_pos] = NULL;
-    
-    char *filename = tokens[redir_pos + 1];
-    
-    int fork_res = fork();
-    if(fork_res == 0) {
-        // Child process - setup append redirection
-        int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if(fd < 0) {
-            printf("Failed to open file %s\n", filename);
-            exit(1);
-        }
-        
-        // Redirect stdout to file
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-        
-        execvp(cmd[0], cmd);
-        printf("Exec failed for %s\n", cmd[0]);
-        exit(1);
-    } else if(fork_res > 0) {
-        wait(NULL);
-    } else {
-        printf("Fork failed\n");
-    }
+    handle_redirection(tokens, num_tokens, ">>", O_WRONLY | O_CREAT | O_APPEND, "Invalid append redirection syntax");
 }
-
 
 // 12. Sequential execution
 void seqexec(char *tokens[], int num_tokens) {
     // Count number of semicolons
     int semi_count = 0;
-    int i;
-    for(i=0; i<num_tokens; i++) {
+    for(int i=0; i<num_tokens; i++) {
         if(strcmp(tokens[i], ";") == 0) {
             semi_count = semi_count + 1;
         }
     }
     
     // Validate max commands
-    if(semi_count > 3) {
+    if(semi_count > 4) {
         printf("Maximum 4 sequential commands allowed\n");
         return;
     }
@@ -571,23 +448,16 @@ void seqexec(char *tokens[], int num_tokens) {
     for(i=0; i<=num_tokens; i++) {
         if(i == num_tokens || strcmp(tokens[i], ";") == 0) {
             int cmd_len = i - start;
-            
-            // Check if command segment is empty
-            if(cmd_len == 0) {
-                printf("Empty command in sequential execution\n");
-                return;
-            }
-            
+                       
             // Validate argc for this segment
-            if(cmd_len < 1 || cmd_len > 5) {
+            if(cmd_len < 1 || cmd_len > 5 || cmd_len == 0) {
                 printf("Each command argc must be between 1 and 5\n");
                 return;
             }
             
             // Build command array for this segment
             char *cmd[MAX_ARGS];
-            int j;
-            for(j=0; j<cmd_len; j++) {
+            for(int j=0; j<cmd_len; j++) {
                 cmd[j] = tokens[start + j];
             }
             cmd[cmd_len] = NULL;
@@ -596,7 +466,6 @@ void seqexec(char *tokens[], int num_tokens) {
             int fork_res = fork();
             if(fork_res == 0) {
                 execvp(cmd[0], cmd);
-                // If exec fails, child exits with error
                 exit(1);
             } else if(fork_res > 0) {
                 int status;
@@ -612,12 +481,320 @@ void seqexec(char *tokens[], int num_tokens) {
                 printf("Fork failed\n");
                 return;
             }
-            
             start = i + 1;
         }
     }
 }
 
+// 13. Pipe execution
+void pipeexec(char *tokens[], int num_tokens) {
+    // Phase 1: Parse and store all commands
+    char *cmds[MAX_COMMANDS][MAX_ARGS];
+    int cmd_lens[MAX_COMMANDS];
+    int cmd_count = 0;
+    
+    // Count pipe operators
+    int pipe_count = 0;
+    for(int i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], "|") == 0) {
+            pipe_count = pipe_count + 1;
+        }
+    }
+
+    if(pipe_count > 4) {
+        printf("Maximum 4 piping operations allowed\n");
+        return;
+    }
+    
+    // Split tokens into command segments
+    int start = 0;
+    for(int i=0; i<=num_tokens; i++) {
+        if(i == num_tokens || strcmp(tokens[i], "|") == 0) {
+            int cmd_len = i - start;
+            
+            if(cmd_len < 1 || cmd_len > 5 || cmd_len == 0) {
+                printf("Each piped command argc must be between 1 and 5\n");
+                return;
+            }
+            
+            // Store command
+            for(int j=0; j<cmd_len; j++) {
+                cmds[cmd_count][j] = tokens[start + j];
+            }
+            cmds[cmd_count][cmd_len] = NULL;
+            cmd_lens[cmd_count] = cmd_len;
+            cmd_count = cmd_count + 1;   
+            start = i + 1;
+        }
+    }
+
+    // creating all pipes    
+    int pipes[cmd_count-1][2];
+    for(int p=0; p<cmd_count-1; p++) {
+        if(pipe(pipes[p]) < 0) {
+            printf("Pipe creation failed\n");
+            return;
+        }
+    }
+    
+    // Fork all children
+    for(int c=0; c<cmd_count; c++) {
+        int fork_res = fork();
+        
+        if(fork_res == 0) {
+            // Connect input pipe if not first command
+            if(c > 0) {
+                dup2(pipes[c-1][0], STDIN_FILENO);
+            }
+            
+            // Connect output pipe if not last command
+            if(c < cmd_count-1) {
+                dup2(pipes[c][1], STDOUT_FILENO);
+            }
+            
+            // Close all pipe file descriptors
+            int x;
+            for(x=0; x<cmd_count-1; x++) {
+                close(pipes[x][0]);
+                close(pipes[x][1]);
+            }
+            
+            execvp(cmds[c][0], cmds[c]);
+            exit(1);
+        } else if(fork_res < 0) {
+            printf("Fork failed\n");
+            return;
+        }
+    }
+    
+    // Parent process - close all pipes
+    for(p=0; p<cmd_count-1; p++) {
+        close(pipes[p][0]);
+        close(pipes[p][1]);
+    }
+    
+    // Wait for all children
+    for(c=0; c<cmd_count; c++) {
+        wait(NULL);
+    }
+}
+
+// 14. Reverse pipe execution
+void revpipe(char *tokens[], int num_tokens) {
+    // Phase 1: Parse commands like normal pipe
+    char *cmds[MAX_COMMANDS][MAX_ARGS];
+    int cmd_lens[MAX_COMMANDS];
+    int cmd_count = 0;
+    
+    // Count reverse pipe operators
+    int rpipe_count = 0;
+    for(int i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], "~") == 0) {
+            rpipe_count = rpipe_count + 1;
+        }
+    }
+    
+    // Validate max reverse pipes
+    if(rpipe_count > 5) {
+        printf("Maximum 5 reverse piping operations allowed\n");
+        return;
+    }
+    
+    // Split tokens into command segments
+    int start = 0;
+    for(int i=0; i<=num_tokens; i++) {
+        if(i == num_tokens || strcmp(tokens[i], "~") == 0) {
+            int cmd_len = i - start;
+            
+            if(cmd_len < 1 || cmd_len > 5 || cmd_len == 0) {
+                printf("Each reverse piped command argc must be between 1 and 5\n");
+                return;
+            }
+            
+            // Store command
+            int j;
+            for(j=0; j<cmd_len; j++) {
+                cmds[cmd_count][j] = tokens[start + j];
+            }
+            cmds[cmd_count][cmd_len] = NULL;
+            cmd_lens[cmd_count] = cmd_len;
+            cmd_count = cmd_count + 1; 
+            start = i + 1;
+        }
+    }
+    
+    // reversing the commands order for reversing pipe logic
+    int left = 0;
+    int right = cmd_count - 1;
+    while(left < right) {
+        // Swap commands at left and right positions
+        char *temp[MAX_ARGS];
+        int j;
+        
+        // Copy left to temp
+        for(j=0; j<=cmd_lens[left]; j++) {
+            temp[j] = cmds[left][j];
+        }
+        
+        // Copy right to left
+        for(j=0; j<=cmd_lens[right]; j++) {
+            cmds[left][j] = cmds[right][j];
+        }
+        
+        // Copy temp to right
+        for(j=0; j<=cmd_lens[left]; j++) {
+            cmds[right][j] = temp[j];
+        }
+        
+        // Swap lengths
+        int temp_len = cmd_lens[left];
+        cmd_lens[left] = cmd_lens[right];
+        cmd_lens[right] = temp_len;
+        
+        left = left + 1;
+        right = right - 1;
+    }
+    
+    // executing the normal logic of pipe
+    int pipes[cmd_count-1][2];
+    
+    // Create all pipes
+    for(int p=0; p<cmd_count-1; p++) {
+        if(pipe(pipes[p]) < 0) {
+            printf("Pipe creation failed\n");
+            return;
+        }
+    }
+    
+    // Fork all children
+    for(int c=0; c<cmd_count; c++) {
+        int fork_res = fork();
+        
+        if(fork_res == 0) {
+            // Connect input pipe if not first command
+            if(c > 0) {
+                dup2(pipes[c-1][0], STDIN_FILENO);
+            }
+            
+            // Connect output pipe if not last command
+            if(c < cmd_count-1) {
+                dup2(pipes[c][1], STDOUT_FILENO);
+            }
+            
+            // Close all pipe file descriptors
+            for(int x=0; x<cmd_count-1; x++) {
+                close(pipes[x][0]);
+                close(pipes[x][1]);
+            }
+            
+            execvp(cmds[c][0], cmds[c]);
+            exit(1);
+        } else if(fork_res < 0) {
+            printf("Fork failed\n");
+            return;
+        }
+    }
+    
+    // Parent process - close all pipes
+    for(p=0; p<cmd_count-1; p++) {
+        close(pipes[p][0]);
+        close(pipes[p][1]);
+    }
+    
+    // Wait for all children
+    for(c=0; c<cmd_count; c++) {
+        wait(NULL);
+    }
+}
+
+// 15. Conditional execution
+void condexec(char *tokens[], int num_tokens) {
+    // Phase 1: Parse into separate arrays for commands and operators
+    char *cmds[MAX_COMMANDS][MAX_ARGS];
+    char *ops[MAX_COMMANDS];
+    int cmd_lens[MAX_COMMANDS];
+    int cmd_count = 0;
+    int op_count = 0;
+    
+    // Count conditional operators
+    int cond_count = 0;
+    for(int i=0; i<num_tokens; i++) {
+        if(strcmp(tokens[i], "&&") == 0 || strcmp(tokens[i], "||") == 0) {
+            cond_count = cond_count + 1;
+        }
+    }
+    
+    // Validate max operators
+    if(cond_count > 5) {
+        printf("Maximum 5 conditional operators allowed\n");
+        return;
+    }
+    
+    // Parse commands and operators
+    int start = 0;
+    for(i=0; i<=num_tokens; i++) {
+        if(i == num_tokens || strcmp(tokens[i], "&&") == 0 || strcmp(tokens[i], "||") == 0) {
+            int cmd_len = i - start;
+
+            if(cmd_len < 1 || cmd_len > 5 || cmd_len == 0) {
+                printf("Each conditional command argc must be between 1 and 5\n");
+                return;
+            }
+            
+            // Store command
+            int j;
+            for(j=0; j<cmd_len; j++) {
+                cmds[cmd_count][j] = tokens[start + j];
+            }
+            cmds[cmd_count][cmd_len] = NULL;
+            cmd_lens[cmd_count] = cmd_len;
+            cmd_count = cmd_count + 1;
+            
+            // Store operator if exists
+            if(i < num_tokens) {
+                ops[op_count] = tokens[i];
+                op_count = op_count + 1;
+            }   
+            start = i + 1;
+        }
+    }
+    
+    // execute after checking conditions
+    for(int c=0; c<cmd_count; c++) {
+        int fork_res = fork();
+        
+        if(fork_res == 0) {
+            execvp(cmds[c][0], cmds[c]);
+            exit(1);
+        } else if(fork_res > 0) {
+            int status;
+            waitpid(fork_res, &status, 0);
+            
+            int exec_failed = 0;
+            if(WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                exec_failed = 1;
+            }
+            
+            // Check if we should continue to next command
+            if(c < cmd_count - 1) {
+                char *op = ops[c];
+                
+                if(strcmp(op, "&&") == 0) {
+                    if(exec_failed) {
+                        return;
+                    }
+                } else if(strcmp(op, "||") == 0) {
+                    if(!exec_failed) {
+                        return;
+                    }
+                }
+            }
+        } else {
+            printf("Fork failed\n");
+            return;
+        }
+    }
+}
 
 /* ======Main Function====== */
 int main(int num_args, char *arguments[]) {
@@ -654,7 +831,7 @@ int main(int num_args, char *arguments[]) {
             token = strtok(NULL, " ");
         }
 
-        /* execvp needs NULL termination */
+        // execvp needs NULL termination
         tokens[num_tokens] = NULL;
 
         if (num_tokens == 0) continue; // empty input: prompt again checking again
@@ -668,44 +845,24 @@ int main(int num_args, char *arguments[]) {
         for (int i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
             if (strcmp(tokens[0], commands[i]) == 0) {
                 command_matched = 1;
+                if (num_tokens != 1) {
+                        printf("Few/many arguments received\n");
+                        break;
+                }
                 switch (i + 1) {
                 case 1: // 1. Kill current terminal - killterm
-                    if (num_tokens != 1) {
-                        printf("Few/many arguments received\n");
-                        break;
-                    }
-                    handle_killterm();
-                    break;
+                    handle_killterm(); break;
 
                 case 2: // 2. Kill all terminals - killallterms
-                    if (num_tokens != 1) {
-                        printf("Few/many arguments received\n");
-                        break;
-                    }
-                    handle_killallterms();
-                    break;
+                    handle_killallterms(); break;
 
                 case 3: // 3. Count bg processes - numbg
-                    if (num_tokens != 1) {
-                        printf("Few/many arguments received\n");
-                        break;
-                    }
-                    count_bg_processes();
-                    break;
+                    count_bg_processes(); break;
 
                 case 4: // 4. kill all process other than current and bash - killbp
-                    if (num_tokens != 1) {
-                        printf("Few/many arguments received\n");
-                        break;
-                    }
-                    kill_all_processes();
-                    break;
+                    kill_all_processes(); break;
 
                 case 5: // 5. Exit
-                    if (num_tokens != 1) {
-                        printf("Few/many arguments received\n");
-                        break;
-                    }
                     return 0; 
 
                 }
@@ -714,7 +871,6 @@ int main(int num_args, char *arguments[]) {
         }
 
         if (!command_matched) {
-            // Check for file operations first
             int has_file_op = 0;
             
             // Check for # operator
@@ -736,10 +892,9 @@ int main(int num_args, char *arguments[]) {
             
             if(has_file_op) continue;
             
-            // Check for redirection operators
             int has_redir = 0;
             
-            // Check for >> first (before >)
+            // Check for >> before >
             for(i=0; i<num_tokens; i++) {
                 if(strcmp(tokens[i], ">>") == 0) {
                     has_redir = 1;
@@ -768,6 +923,39 @@ int main(int num_args, char *arguments[]) {
                 }
             }
             if(has_redir) continue;
+            
+            // Check for conditional execution
+            int has_cond = 0;
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], "&&") == 0 || strcmp(tokens[i], "||") == 0) {
+                    has_cond = 1;
+                    condexec(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_cond) continue;
+            
+            // Check for reverse pipe
+            int has_revpipe = 0;
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], "~") == 0) {
+                    has_revpipe = 1;
+                    revpipe(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_revpipe) continue;
+            
+            // Check for normal pipe
+            int has_pipe = 0;
+            for(i=0; i<num_tokens; i++) {
+                if(strcmp(tokens[i], "|") == 0) {
+                    has_pipe = 1;
+                    pipeexec(tokens, num_tokens);
+                    break;
+                }
+            }
+            if(has_pipe) continue;
             
             // Check for sequential execution
             int has_semi = 0;
